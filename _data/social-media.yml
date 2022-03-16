@@ -1,0 +1,23 @@
+Email:
+  id: 'issa@memari.me'
+  href: 'mailto:'
+  title: 'Email'
+  fa-icon: 'fa fa-envelope-square fa-xl'
+
+GitHub:
+  id: 'issamemari'
+  href: 'https://github.com/'
+  title: 'GitHub'
+  fa-icon: 'fa-brands fa-github fa-xl'
+
+LinkedIn:
+  id: 'issa-memari-075395112'
+  href: 'https://www.linkedin.com/'
+  title: 'LinkedIn'
+  fa-icon: 'fa fa-linkedin-square fa-xl'
+
+Medium:
+  id: '@issa.memari'
+  href: 'https://medium.com/'
+  title: 'Medium'
+  fa-icon: 'fa-brands fa-medium fa-xl'
