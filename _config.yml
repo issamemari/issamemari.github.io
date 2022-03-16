@@ -16,17 +16,25 @@
 # These are used to personalize your new site. If you look in the HTML files,
 # you will see them accessed via {{ site.title }}, {{ site.email }}, and so on.
 # You can create any custom variable you would like, and they will be accessible
-# in the templates via {{ site.myvariable }}.
+# in the templates via {e via RSS{ site.myvariable }}.
 
 title: Issa Memari
 email: issa@memari.me
 description: >- # this means to ignore newlines until "baseurl:"
-  Welcome to my personal website! My name is Issa Memari, I'm a machine learning engineer.
+  Welcome to my personal website! My name is Issa Memari,
+  I'm a machine learning engineer with 5 years of experience.
 
 baseurl: "" # the subpath of your site, e.g. /blog
 url: "" # the base hostname & protocol for your site, e.g. http://example.com
 github_username:  issamemari
 linkedin_username: issa-memari-075395112
+
+# Fields minima uses, but are not defaulted with the jekyll new command.
+# Author is the default for posts, the Atom feed, and is used in the footer.
+author: Issa Memari
+
+# avatar
+avatar: /images/avatar.png
 
 # Build settings
 # Removed minima theme as it is now a regular theme
