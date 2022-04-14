@@ -17,7 +17,7 @@ permalink: /about/
     <img alt="Email" src="https://img.shields.io/static/v1?label=Email&message=issa@memari.me&style=for-the-badge&color=black&logo=protonmail&cacheSeconds=3600&link=mailto:issa@memari.me" />
   </a>
   <a href="https://github.com/issamemari" target="_blank">
-    <img alt="Email" src="https://img.shields.io/static/v1?label=GitHub&message=issamemari&style=for-the-badge&color=black&logo=github&cacheSeconds=3600&link=https://github.com/issamemari" />
+    <img alt="GitHub" src="https://img.shields.io/static/v1?label=GitHub&message=issamemari&style=for-the-badge&color=black&logo=github&cacheSeconds=3600&link=https://github.com/issamemari" />
   </a>
 </p>
 

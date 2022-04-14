@@ -45,3 +45,5 @@ plugins:
 markdown: kramdown
 kramdown:
    math_engine: mathjax
+
+github_comments_repository:  issamemari/issamemari.github.io
