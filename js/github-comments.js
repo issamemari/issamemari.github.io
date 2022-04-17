@@ -1,4 +1,4 @@
-async function getComments(repo_name, comment_id, page_id, acc )
+async function getComments(repo_name, comment_id, page_id, acc)
 {
     const url = "https://api.github.com/repos/" + repo_name + "/issues/" + comment_id + "/comments" + "?page=" + page_id;
     const resp = await fetch (url, { headers: {Accept: "application/vnd.github.v3.html+json"}});
