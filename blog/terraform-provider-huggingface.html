@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Building a Terraform Provider for HuggingFace Endpoints | Issa Memari</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Newsreader:ital,wght@0,400;0,500;0,600;1,400&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="../css/modern-style.css">
+</head>
+
+<body>
+    <header>
+        <div class="container">
+            <div class="header-content">
+                <a href="../index.html" class="logo">issa<span>.</span>memari</a>
+                <nav>
+                    <a href="../index.html#about">About</a>
+                    <a href="../index.html#blog">Writing</a>
+                    <a href="https://github.com/issamemari" target="_blank">GitHub</a>
+                </nav>
+            </div>
+        </div>
+    </header>
+
+    <div class="container">
+        <div class="article-header">
+            <div class="article-meta">
+                <span class="tag">Infrastructure</span>
+                <span>January 8, 2024</span>
+                <span>12 min read</span>
+            </div>
+            <h1>Building a Terraform Provider for HuggingFace Endpoints</h1>
+            <p class="subtitle">A deep dive into Terraform's plugin architecture and how to extend it for any API.</p>
+        </div>
+
+        <article>
+            <p>When our team adopted HuggingFace Inference Endpoints for ML model serving, we hit a familiar problem:
+                everything else in our stack was managed with Terraform, but HuggingFace didn't have a provider. This
+                meant manual deployments, configuration drift, and no version control for our endpoint configs.</p>
+
+            <p>So I built one. What started as a pragmatic solution turned into a deep exploration of how Terraform
+                actually works—and resulted in an open-source provider that now manages all 29 of our production
+                endpoints on GCP.</p>
+
+            <div class="stats-grid">
+                <div class="stat">
+                    <span class="stat-value">29</span>
+                    <span class="stat-label">Endpoints Managed</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-value">GCP</span>
+                    <span class="stat-label">Cloud Provider</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-value">0</span>
+                    <span class="stat-label">Manual Deployments</span>
+                </div>
+            </div>
+
+            <h2>What Terraform Actually Does</h2>
+
+            <p>At its core, Terraform is a state reconciliation engine. You describe the infrastructure you want
+                (desired state), Terraform compares that to what exists (actual state), and figures out what changes are
+                needed to make reality match your description.</p>
+
+            <p>The workflow has three phases: <code>init</code> downloads providers and modules, <code>plan</code>
+                computes a diff between desired and actual state, and <code>apply</code> executes the changes. A state
+                file tracks what Terraform has created so it can manage those resources going forward.</p>
+
+            <div class="diagram">
+                <span class="info">terraform init</span> <span class="info">terraform plan</span> <span
+                    class="info">terraform apply</span>
+                │ │ │
+                ▼ ▼ ▼
+                ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+                │ Download │ │ Compare │ │ Execute │
+                │ Providers │ ────▶ │ Desired │ ────▶ │ Changes │
+                │ & Modules │ │ vs Actual │ │ │
+                └──────────────┘ └──────────────┘ └──────────────┘
+                │ │
+                ▼ ▼
+                <span class="highlight">Execution Plan</span> <span class="success">State Updated</span>
+            </div>
+            <p class="diagram-caption">Terraform's three-phase workflow</p>
+
+            <h2>The Plugin Architecture</h2>
+
+            <p>Here's the key insight: Terraform itself doesn't know how to create a GCP instance or an AWS bucket or a
+                HuggingFace endpoint. All that knowledge lives in <em>providers</em>—separate binaries that communicate
+                with Terraform Core through gRPC.</p>
+
+            <div class="diagram">
+                ┌────────────────────────────────────────────────────────────────┐
+                │ <span class="highlight">TERRAFORM CORE</span> │
+                │ │
+                │ .tf files ───▶ State Management ───▶ Execution Engine │
+                └────────────────────────────────┬───────────────────────────────┘
+                │
+                <span class="info">gRPC Protocol</span>
+                │
+                ┌────────────────────────────────┴───────────────────────────────┐
+                │ <span class="highlight">PROVIDER PLUGIN</span> │
+                │ │
+                │ Schema Definition ── CRUD Operations ── State Mapping │
+                │ │
+                │ terraform-provider-huggingface │
+                └────────────────────────────────┬───────────────────────────────┘
+                │
+                <span class="success">HTTP/REST API</span>
+                │
+                ▼
+                <span class="success">HuggingFace API</span>
+            </div>
+            <p class="diagram-caption">Providers are separate binaries that bridge Terraform and external APIs</p>
+
+            <p>This architecture is elegant because it's infinitely extensible. Anyone can write a provider for any
+                service. Providers handle three responsibilities: defining a schema (what resources exist and their
+                attributes), implementing CRUD operations (create, read, update, delete), and mapping between
+                Terraform's state model and the external API.</p>
+
+            <h2>Building the Provider</h2>
+
+            <p>I didn't start from scratch. HashiCorp provides a <a
+                    href="https://github.com/hashicorp/terraform-provider-scaffolding-framework">scaffold repository</a>
+                that gives you a working provider skeleton with the correct project structure and build configuration.
+                This was invaluable for getting started quickly.</p>
+
+            <p>Before touching any Terraform code, I created a standalone Go client for the HuggingFace API. This was a
+                deliberate choice—a clean HTTP client is useful beyond Terraform, and I thought others might want to use
+                it in their own projects. Separating concerns also made testing much easier.</p>
+
+            <p>The provider itself uses HashiCorp's <code>terraform-plugin-framework</code>, which handles the gRPC
+                protocol, state serialization, and plan diffing. Your job is to define resources and implement what
+                happens during each lifecycle operation.</p>
+
+            <h2>Defining Resources</h2>
+
+            <p>Each resource in a Terraform provider needs two things: a schema that describes its shape, and methods
+                that implement its lifecycle. The schema tells Terraform what attributes exist, which are required vs
+                optional, and which are computed by the API.</p>
+
+            <p>For a HuggingFace endpoint, the schema includes things like the endpoint name, the model repository,
+                compute configuration (instance type, accelerator, scaling settings), and cloud region. Some fields like
+                <code>status</code> and <code>url</code> are computed—they're returned by the API after creation, not
+                specified by the user.
+            </p>
+
+            <div class="diagram">
+                <span class="highlight">RESOURCE SCHEMA</span>
+
+                ┌─────────────────────────────────────────────────────────────────┐
+                │ huggingface_endpoint │
+                ├─────────────────────────────────────────────────────────────────┤
+                │ │
+                │ <span class="info">Required</span> <span class="dim">User must provide</span> │
+                │ ├── name string │
+                │ ├── model.repository string │
+                │ └── compute.instance_type string │
+                │ │
+                │ <span class="info">Optional</span> <span class="dim">Defaults if not set</span> │
+                │ ├── type string (default: "private") │
+                │ ├── cloud.region string (default: "us-east1") │
+                │ └── compute.scaling object │
+                │ │
+                │ <span class="success">Computed</span> <span class="dim">Returned by API</span> │
+                │ ├── id string │
+                │ ├── status string │
+                │ └── url string │
+                │ │
+                └─────────────────────────────────────────────────────────────────┘
+            </div>
+            <p class="diagram-caption">Schema defines the shape of a resource</p>
+
+            <h2>Implementing the Lifecycle</h2>
+
+            <p>The framework requires you to implement four methods for each resource: Create, Read, Update, and Delete.
+                These methods are where the actual API calls happen.</p>
+
+            <p><strong>Create</strong> receives the planned configuration, calls the HuggingFace API to provision the
+                endpoint, and stores the result (including computed fields like the endpoint URL) in Terraform's state.
+            </p>
+
+            <p><strong>Read</strong> is called before every plan to sync Terraform's state with reality. It fetches the
+                current endpoint configuration from the API and updates the state. If the endpoint was deleted outside
+                of Terraform (through the UI, for instance), Read removes it from state so Terraform knows to recreate
+                it.</p>
+
+            <p><strong>Update</strong> handles configuration changes. It compares the planned state to the current
+                state, figures out what changed, and makes the appropriate API calls. Some changes might require
+                replacing the resource entirely—the schema can declare which attributes force replacement.</p>
+
+            <p><strong>Delete</strong> is straightforward: call the API to tear down the endpoint and remove it from
+                state.</p>
+
+            <div class="diagram">
+                <span class="highlight">terraform apply</span>
+                │
+                ▼
+                ┌────────────────┐
+                │ Read current │ ◀─────── GET /endpoint/{name}
+                │ state │
+                └───────┬────────┘
+                │
+                ▼
+                ┌────────────────┐
+                │ Compare plan │
+                │ vs state │
+                └───────┬────────┘
+                │
+                ┌────────┼────────┬─────────────┐
+                ▼ ▼ ▼ ▼
+                <span class="success">No change</span> <span class="info">Create</span> <span class="info">Update</span>
+                <span class="highlight">Delete</span>
+                │ │ │ │
+                │ ▼ ▼ ▼
+                │ POST PUT DELETE
+                │ │ │ │
+                └────────┴────────┴─────────────┘
+                │
+                ▼
+                <span class="success">State updated</span>
+            </div>
+            <p class="diagram-caption">Each lifecycle method maps to API operations</p>
+
+            <div class="callout">
+                <p>The trickiest part was Terraform's type system. Fields aren't just "set or not"—they can be
+                    <em>null</em> (explicitly unset), <em>unknown</em> (will be computed after apply), or have an actual
+                    value. Getting this wrong produces confusing plan output where Terraform shows changes that don't
+                    actually exist.
+                </p>
+            </div>
+
+            <h2>Publishing to the Registry</h2>
+
+            <p>Getting the provider into the official Terraform Registry was surprisingly straightforward. The key tool
+                is <a href="https://goreleaser.com/">GoReleaser</a>, which handles cross-compilation for all platforms
+                and creates signed GitHub releases.</p>
+
+            <p>The process works like this: you set up a GitHub Action that triggers on version tags, GoReleaser builds
+                binaries for Linux, macOS, and Windows (both AMD64 and ARM64), signs the checksums with your GPG key,
+                and publishes a GitHub release. The Terraform Registry syncs automatically within minutes.</p>
+
+            <p>Once published, anyone can use the provider by adding it to their Terraform configuration and running
+                <code>terraform init</code>:
+            </p>
+
+            <pre data-lang="hcl"><code>terraform {
+  required_providers {
+    huggingface = {
+      source  = "issamemari/huggingface"
+      version = "~> 1.0"
+    }
+  }
+}
+
+provider "huggingface" {
+  namespace = var.huggingface_namespace
+  token     = var.huggingface_token
+}</code></pre>
+
+            <h2>What I Learned</h2>
+
+            <p>Building this provider taught me more about Terraform than years of using it. A few takeaways:</p>
+
+            <ul>
+                <li><strong>Providers are just structured API clients.</strong> If you can write a REST client, you can
+                    write a provider. The framework handles state management, diffing, and the protocol.</li>
+                <li><strong>The scaffold is invaluable.</strong> Don't start from scratch. It gives you working build
+                    configs, correct project structure, and examples of every pattern.</li>
+                <li><strong>Separate your API client.</strong> Building the HuggingFace client as a standalone package
+                    simplified testing and enabled reuse beyond Terraform.</li>
+                <li><strong>Test against real infrastructure.</strong> Unit tests are great, but state management bugs
+                    only surface when reconciling against actual resources.</li>
+            </ul>
+
+            <blockquote>The best infrastructure investments make the boring stuff automatic so you can focus on
+                interesting problems.</blockquote>
+
+            <p>We've now eliminated an entire category of incidents—no more orphaned endpoints burning money, no more
+                "works on my endpoint" debugging sessions, no more manual processes that only one person understands.
+                Every endpoint change goes through code review like any other infrastructure change.</p>
+
+            <p>Both repositories are open source:</p>
+
+            <ul>
+                <li><a
+                        href="https://github.com/issamemari/terraform-provider-huggingface">terraform-provider-huggingface</a>
+                </li>
+                <li><a
+                        href="https://github.com/issamemari/huggingface-endpoints-client">huggingface-endpoints-client</a>
+                </li>
+            </ul>
+
+            <p>If you're managing HuggingFace endpoints and want to bring them into your Terraform workflow, give it a
+                try.</p>
+        </article>
+    </div>
+
+    <footer>
+        <div class="container">
+            <div class="footer-content">
+                <div class="footer-links">
+                    <a href="https://github.com/issamemari">GitHub</a>
+                    <a href="https://www.linkedin.com/in/issa-memari/">LinkedIn</a>
+                    <a href="mailto:issa@memari.me">Email</a>
+                </div>
+                <div class="footer-copy">© 2026 Issa Memari</div>
+            </div>
+        </div>
+    </footer>
+</body>
+
+</html>
