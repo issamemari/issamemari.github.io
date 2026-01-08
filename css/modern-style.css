@@ -241,7 +241,6 @@ nav a:hover {
     font-family: 'JetBrains Mono', monospace;
     font-size: 0.65rem;
     color: var(--text-muted);
-    text-transform: uppercase;
     letter-spacing: 0.08em;
     margin-bottom: 1rem;
 }
