@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Implementing Radix Select for the GPU: A Worklog | Issa Memari</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Newsreader:ital,wght@0,400;0,500;0,600;1,400&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="../css/modern-style.css">
+</head>
+
+<body>
+    <header>
+        <div class="container">
+            <div class="header-content">
+                <a href="../index.html" class="logo">issa<span>.</span>memari</a>
+                <nav>
+                    <a href="../index.html#about">About</a>
+                    <a href="../index.html#blog">Writing</a>
+                    <a href="https://github.com/issamemari" target="_blank">GitHub</a>
+                </nav>
+            </div>
+        </div>
+    </header>
+
+    <div class="container">
+        <div class="article-header">
+            <div class="article-meta">
+                <span class="tag">GPU</span>
+                <span>January 2026</span>
+                <span>6 min read</span>
+            </div>
+            <h1>Implementing Radix Select for the GPU: A Worklog</h1>
+            <p class="subtitle">Building a radix-based TopK selection kernel and iterating toward Thrust-beating performance.</p>
+        </div>
+
+        <article>
+            <p>In this post, I'll implement a radix-based selection algorithm for GPUs from scratch. My goal is to
+                build a TopK kernel that's actually competitive with the state of the art—which, as I discovered the
+                hard way, is a higher bar than I expected.</p>
+
+            <h2>The Humbling</h2>
+
+            <p>I started this project thinking I had a decent TopK implementation. I was combining ideas from <a href="https://arxiv.org/abs/2104.13519">Dr. TopK</a>
+                with a simple selection approach: loop <code>i = 0</code> to <code>K</code>, find the maximum in
+                <code>array[i:]</code>, swap it with <code>array[i]</code>. After some optimizations—parallel
+                reductions, warp-level operations, block-level coordination—I thought I had a pretty good kernel.</p>
+
+            <p>Then I benchmarked against Thrust:</p>
+
+            <pre><code>./dr_topk_parallel_topk_unroll_warp_parallel_block_reduction_param_optimized 100000000 1000
+Running dr_topk with N=100000000, K=1000
+=== Algorithm Performance Report ===
+N = 100000000, K = 1000
+
+Step 1 - Data preparation & H2D copy: 5554.255 ms
+Step 2 - Find delegates (RW=4096, threads=24415): 31.818 ms
+Step 3 - Prepare delegate indices & H2D copy: 0.231 ms
+Step 4 - Find top-K from delegates: 19.117 ms
+Step 5 - Concatenate top-K ranges: 0.246 ms
+Step 6 - Final top-K on concatenated ranges: 282.780 ms
+Step 7 - D2H copy: 0.082 ms</code></pre>
+
+            <p>The total kernel time is around <strong>334ms</strong>. Now compare to Thrust just... sorting the entire
+                array:</p>
+
+            <pre><code>./thrust_topk 100000000 1000
+=== Thrust Sort TopK ===
+N = 100000000, K = 1000
+
+Step 1 - Data preparation & H2D copy: 5380.762 ms
+Step 2 - Thrust sort (descending): 39.574 ms
+Step 3 - D2H copy: 0.043 ms</code></pre>
+
+            <p><strong>39ms.</strong> Thrust can <em>sort 100 million elements</em> faster than my kernel can find the top
+                1000. And my kernel should be faster—I'm doing less work! I only need to find K items, not establish a
+                total ordering.</p>
+
+            <p>This was deflating. But also clarifying: my baseline should be sorting with Thrust and taking the first
+                K. If I want to beat that, I need to use the same underlying technique Thrust uses. I dug into the
+                <a href="https://github.com/nvidia/thrust">Thrust source</a> and found the answer: radix sort.</p>
+
+            <h2>A Quick Primer on Radix Sort</h2>
+
+            <p>Radix sort is one of those algorithms that seems almost too simple to work, and yet it's the foundation of
+                the fastest GPU sorting implementations. It's a non-comparison sort, which lets it break the
+                <code>O(n log n)</code> lower bound for comparison-based sorts; complexity is <code>O(nw)</code> where
+                <code>w</code> is the number of digits/bits.</p>
+
+            <p>The basic idea: repeatedly bucket elements by their digits, starting from the least significant. Here's a
+                worked example with decimal numbers:</p>
+
+            <pre><code>array: [23, 66, 12, 539, 12, 32, 61]</code></pre>
+
+            <p><strong>Pass 1: Bucket by ones digit</strong></p>
+
+            <pre><code>bucket 0:
+bucket 1: 61
+bucket 2: 12, 12, 32
+bucket 3: 23
+bucket 6: 66
+bucket 9: 539
+
+Unload in bucket order: [61, 12, 12, 32, 23, 66, 539]</code></pre>
+
+            <p>In practice, GPU implementations work on binary and process multiple bits at once—typically 4–8 bits per
+                pass, giving 16–256 buckets. The principle is identical.</p>
+
+            <h2>From Sorting to Selection</h2>
+
+            <p>We don't need to sort. We just need the top K. Start from the most significant digit and work down. At each
+                digit position we can identify buckets that must be in the top K, buckets that cannot be, and the
+                pivot bucket that straddles the boundary—only the pivot requires further processing.</p>
+
+            <p>Worked example:</p>
+
+            <pre><code>array: [23, 66, 12, 539, 12, 32, 61]
+K = 3
+
+Pass 1: Bucket by hundreds digit
+bucket 0: 23, 66, 12, 12, 32, 61  (6 elements)
+bucket 5: 539                     (1 element)
+
+Bucket 5 contains 1 element which is guaranteed to be in top-3: [539]
+We now need 2 more elements from bucket 0.
+
+Pass 2: Bucket the remaining elements by tens digit
+bucket 1: 12, 12
+bucket 2: 23
+bucket 3: 32
+bucket 6: 66, 61
+
+Bucket 6 has 2 elements. Combined with 539 that's exactly 3.
+
+Top 3: [539, 66, 61]</code></pre>
+
+            <h2>The Algorithm, Formally</h2>
+
+            <pre><code>def radix_select(array, k, digit_rank) -> list:
+    if digit_rank < 0:
+        return list(array)[:k]
+
+    if len(array) == 0:
+        return []
+
+    if len(array) <= k:
+        return list(array)
+
+    # Bucket by current digit
+    buckets = [[] for _ in range(10)]
+    for number in array:
+        digit = (number // (10**digit_rank)) % 10
+        buckets[digit].append(number)
+
+    # Scan from highest bucket downward
+    found = []
+    for i in range(len(buckets))[::-1]:
+        if len(buckets[i]) == 0:
+            continue
+
+        if len(found) + len(buckets[i]) <= k:
+            # This entire bucket is in top-K
+            found.extend(buckets[i])
+            if len(found) == k:
+                return found
+        else:
+            # This bucket straddles the boundary—recurse
+            needed = k - len(found)
+            return found + radix_select(buckets[i], needed, digit_rank - 1)
+
+    return found</code></pre>
+
+            <h2>Why This Should Be Fast on GPUs</h2>
+
+            <ul>
+                <li>Each pass processes all elements in parallel—one thread per element.</li>
+                <li>Number of passes is bounded (e.g., 4 passes for 32-bit integers with 8-bit radix).</li>
+                <li>We do less work than sorting for small K relative to N.</li>
+                <li>Memory access pattern is friendly—scans enable coalesced accesses.</li>
+            </ul>
+
+            <p>The practical challenge is efficient bucketing: naive writes cause memory contention. The standard GPU
+                solution is a parallel prefix-sum (scan) to compute offsets, then a scatter pass.</p>
+
+            <h2>What's Next</h2>
+
+            <p>Follow-up posts will walk through CUDA implementations:</p>
+            <ol>
+                <li>Kernel 1: Naive bucketing — baseline</li>
+                <li>Kernel 2: Prefix sum + scatter — standard technique</li>
+                <li>Kernel 3: Per-block histograms — reduce contention</li>
+                <li>Kernel 4: Multi-bit radix — process multiple bits per pass</li>
+                <li>Kernel 5: Early termination — exploit selection structure</li>
+            </ol>
+
+            <div class="callout">
+                <p>The goal is to beat Thrust's sort-and-take-K baseline by a meaningful margin. If we only beat it by
+                    a small percentage, it's probably not worth the added complexity.</p>
+            </div>
+
+            <p>The code for this project is available on <a href="https://github.com/">GitHub</a>. I'm working through
+                code and posts together, so expect updates.</p>
+        </article>
+    </div>
+
+    <footer>
+        <div class="container">
+            <div class="footer-content">
+                <div class="footer-links">
+                    <a href="https://github.com/issamemari">GitHub</a>
+                    <a href="https://www.linkedin.com/in/issa-memari/">LinkedIn</a>
+                    <a href="mailto:issa@memari.me">Email</a>
+                </div>
+                <div class="footer-copy">© 2026 Issa Memari</div>
+            </div>
+        </div>
+    </footer>
+</body>
+
+</html>
