@@ -35,7 +35,8 @@
                 <span>6 min read</span>
             </div>
             <h1>Implementing Radix Select for the GPU: A Worklog</h1>
-            <p class="subtitle">Building a radix-based TopK selection kernel and iterating toward Thrust-beating performance.</p>
+            <p class="subtitle">Building a radix-based TopK selection kernel and iterating toward Thrust-beating
+                performance.</p>
         </div>
 
         <article>
@@ -45,10 +46,12 @@
 
             <h2>The Humbling</h2>
 
-            <p>I started this project thinking I had a decent TopK implementation. I was combining ideas from <a href="https://arxiv.org/abs/2104.13519">Dr. TopK</a>
+            <p>I started this project thinking I had a decent TopK implementation. I was combining ideas from <a
+                    href="https://arxiv.org/abs/2104.13519">Dr. TopK</a>
                 with a simple selection approach: loop <code>i = 0</code> to <code>K</code>, find the maximum in
                 <code>array[i:]</code>, swap it with <code>array[i]</code>. After some optimizations—parallel
-                reductions, warp-level operations, block-level coordination—I thought I had a pretty good kernel.</p>
+                reductions, warp-level operations, block-level coordination—I thought I had a pretty good kernel.
+            </p>
 
             <p>Then I benchmarked against Thrust:</p>
 
@@ -76,20 +79,24 @@ Step 1 - Data preparation & H2D copy: 5380.762 ms
 Step 2 - Thrust sort (descending): 39.574 ms
 Step 3 - D2H copy: 0.043 ms</code></pre>
 
-            <p><strong>39ms.</strong> Thrust can <em>sort 100 million elements</em> faster than my kernel can find the top
+            <p><strong>39ms.</strong> Thrust can <em>sort 100 million elements</em> faster than my kernel can find the
+                top
                 1000. And my kernel should be faster—I'm doing less work! I only need to find K items, not establish a
                 total ordering.</p>
 
             <p>This was deflating. But also clarifying: my baseline should be sorting with Thrust and taking the first
                 K. If I want to beat that, I need to use the same underlying technique Thrust uses. I dug into the
-                <a href="https://github.com/nvidia/thrust">Thrust source</a> and found the answer: radix sort.</p>
+                <a href="https://github.com/nvidia/thrust">Thrust source</a> and found the answer: radix sort.
+            </p>
 
             <h2>A Quick Primer on Radix Sort</h2>
 
-            <p>Radix sort is one of those algorithms that seems almost too simple to work, and yet it's the foundation of
+            <p>Radix sort is one of those algorithms that seems almost too simple to work, and yet it's the foundation
+                of
                 the fastest GPU sorting implementations. It's a non-comparison sort, which lets it break the
                 <code>O(n log n)</code> lower bound for comparison-based sorts; complexity is <code>O(nw)</code> where
-                <code>w</code> is the number of digits/bits.</p>
+                <code>w</code> is the number of digits/bits.
+            </p>
 
             <p>The basic idea: repeatedly bucket elements by their digits, starting from the least significant. Here's a
                 worked example with decimal numbers:</p>
@@ -112,7 +119,8 @@ Unload in bucket order: [61, 12, 12, 32, 23, 66, 539]</code></pre>
 
             <h2>From Sorting to Selection</h2>
 
-            <p>We don't need to sort. We just need the top K. Start from the most significant digit and work down. At each
+            <p>We don't need to sort. We just need the top K. Start from the most significant digit and work down. At
+                each
                 digit position we can identify buckets that must be in the top K, buckets that cannot be, and the
                 pivot bucket that straddles the boundary—only the pivot requires further processing.</p>
 
@@ -185,6 +193,104 @@ Top 3: [539, 66, 61]</code></pre>
 
             <p>The practical challenge is efficient bucketing: naive writes cause memory contention. The standard GPU
                 solution is a parallel prefix-sum (scan) to compute offsets, then a scatter pass.</p>
+
+            <h2>From Python to CUDA: The Practical Challenges</h2>
+
+            <p>Before we can implement this on a GPU, we need to address some impedance mismatches between the Python
+                sketch and CUDA C.</p>
+
+            <h3>Dynamic Allocation is the Enemy</h3>
+
+            <p>The Python implementation casually creates new lists for each bucket at each recursion level. This is
+                fine for a 20-line prototype, but on a GPU, dynamic memory allocation is expensive—and doing it from
+                within a kernel is even worse. You <em>can</em> use <code>malloc</code> from device code on modern
+                hardware, but it's backed by a fixed-size heap and has terrible performance for fine-grained
+                allocations.</p>
+
+            <p>The fix is a classic trick: <strong>pre-allocate once, partition logically</strong>. Allocate a single
+                output array the same size as the input, then use index arithmetic to carve it into buckets.</p>
+
+            <p>The implementation requires two passes:</p>
+            <ol>
+                <li><strong>Histogram pass</strong>: Count how many elements fall into each bucket.</li>
+                <li><strong>Scatter pass</strong>: Compute prefix sums to get bucket offsets, then write each element to
+                    its destination.</li>
+            </ol>
+
+            <pre><code>Input:  [23, 66, 12, 539, 12, 32, 61]
+
+Pass 1 - Count by hundreds digit:
+  bucket 0: 6 elements
+  bucket 5: 1 element
+
+Pass 2 - Compute offsets via prefix sum:
+  bucket 0 starts at index 0
+  bucket 5 starts at index 6
+
+Pass 3 - Scatter to output:
+  Output: [23, 66, 12, 12, 32, 61, 539]
+           └─── bucket 0 ───┘   └─ bucket 5</code></pre>
+
+            <p>Each thread reads one element, determines its bucket, atomically increments a per-bucket counter to
+                claim a slot, and writes to that slot. The atomic increment is the only synchronization needed. This
+                is still a simplification—real implementations use per-block histograms to reduce contention, then
+                combine them. We'll get there in later kernels.</p>
+
+            <h3>The Negative Number Problem</h3>
+
+            <p>There's a more subtle issue lurking in our algorithm: negative numbers. Radix select assumes that higher
+                digits imply larger values. That breaks with two's-complement signed integers because their bit
+                patterns, when interpreted as unsigned, place negatives after positives.</p>
+
+            <p>Example:</p>
+            <pre><code>array: [5, -3, 2, -1, 4]
+K = 2 (we want the two largest: 5 and 4)
+
+Bit patterns (int8 two's complement):
+  5 = 0b00000101
+  4 = 0b00000100
+  2 = 0b00000010
+ -1 = 0b11111111
+ -3 = 0b11111101
+
+If we bucket by the top bits, negatives fall into the largest unsigned buckets (0b11) and will be selected
+first—wrong.</code></pre>
+
+            <h3>The Fix: Flip the Sign Bit</h3>
+
+            <p>We need a transformation that makes bit-pattern ordering match numeric ordering. The solution is
+                surprisingly simple: <strong>flip the most significant bit</strong>.</p>
+
+            <pre><code>Original → Flip MSB
+  5 (0b00000101) → 0b10000101 (133)
+  4 (0b00000100) → 0b10000100 (132)
+  2 (0b00000010) → 0b10000010 (130)
+ -1 (0b11111111) → 0b01111111 (127)
+ -3 (0b11111101) → 0b01111101 (125)</code></pre>
+
+            <p>After flipping the MSB, transformed positives map to the upper half of the unsigned range and
+                transformed negatives map to the lower half; lexicographic ordering of bit patterns now matches
+                numeric ordering.</p>
+
+            <p>For 32-bit integers the device/host helpers look like this:</p>
+
+            <pre><code>// Transform signed int to radix-sortable unsigned
+__device__ __host__ unsigned int to_sortable(int x) {
+    return (unsigned int)x ^ 0x80000000u;  // flip MSB
+}
+
+// Transform back
+__device__ __host__ int from_sortable(unsigned int x) {
+    return (int)(x ^ 0x80000000u);  // flip MSB again (self-inverse)
+}</code></pre>
+
+            <p>Apply <code>to_sortable()</code>, run radix select on the unsigned representations, then convert the
+                results back with <code>from_sortable()</code>. The XOR trick is self-inverse, so the same operation
+                works both ways.</p>
+
+            <p>This approach extends to floating-point numbers with a small variation: IEEE-754 floats require special
+                handling because negatives are stored differently; the rule is: flip the sign bit for positives, and
+                flip all bits for negatives. We'll cover that transformation when we implement float support.</p>
 
             <h2>What's Next</h2>
 
