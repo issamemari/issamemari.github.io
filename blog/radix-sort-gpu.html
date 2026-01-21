@@ -11,6 +11,8 @@
         href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Newsreader:ital,wght@0,400;0,500;0,600;1,400&display=swap"
         rel="stylesheet">
     <link rel="stylesheet" href="../css/modern-style.css">
+    <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
 </head>
 
 <body>
@@ -214,11 +216,11 @@ bucket 6: 66, 61</code></pre>
             <p>The fix is a classic trick: <strong>pre-allocate once, partition logically</strong>. We allocate a single
                 output array the same size as the input, then use index arithmetic to carve it into buckets.</p>
 
-            <p>The implementation requires two passes:</p>
+            <p>The implementation requires three passes:</p>
             <ol>
                 <li><strong>Histogram pass</strong>: Count how many elements fall into each bucket</li>
-                <li><strong>Scatter pass</strong>: Compute prefix sums to get bucket offsets, then write each element to
-                    its destination</li>
+                <li><strong>Prefix sum pass</strong>: Compute prefix sums to get bucket offsets</li>
+                <li><strong>Scatter pass</strong>: Write each element to its destination</li>
             </ol>
 
             <pre><code>Input:  [23, 66, 12, 539, 12, 32, 61]
@@ -427,9 +429,213 @@ __device__ __host__ int from_sortable(unsigned int x) {
 
             <p>We apply <code>to_sortable()</code> before radix select, run the algorithm on unsigned values, then apply <code>from_sortable()</code> to the results. The transformation is its own inverse, so we use the same XOR operation both ways.</p>
 
-            <p>This same approach extends to floating-point numbers, though the transformation is slightly more involved—IEEE 754 floats use sign-magnitude representation rather than two's complement, so we need to handle positive and negative floats differently. We'll cover that when we need it.<sup>7</sup></p>
+            <h4>What About Floating-Point Numbers?</h4>
 
-            <p class="footnote"><sup>7</sup> Quick preview: for positive floats, flip the sign bit (like integers). For negative floats, flip <em>all</em> bits. This handles the fact that negative floats are "backwards"—(-1.0) has a larger bit pattern than (-2.0) despite being numerically larger.</p>
+            <p>The same principle applies to floats, but IEEE 754 floating-point representation requires a slightly different transformation. Before we get there, let's understand how floats work.</p>
+
+            <h5>The Problem</h5>
+
+            <p>Writing integers in binary is straightforward—two's complement handles both positive and negative values elegantly. Floating-point numbers are trickier. The core challenge is representing the decimal point. When designing a binary representation for floats, you need to balance several concerns:</p>
+
+            <ul>
+                <li><strong>Range</strong>: Can you represent both very large and very small numbers?</li>
+                <li><strong>Precision</strong>: How many significant digits can you store?</li>
+                <li><strong>Efficiency</strong>: Can hardware compare and operate on these values quickly?</li>
+                <li><strong>Uniqueness</strong>: Ideally, each number should have exactly one representation.</li>
+            </ul>
+
+            <h5>Scientific Notation to the Rescue</h5>
+
+            <p>The IEEE 754 designers used scientific notation. You're probably familiar with base-10 scientific notation, where you factor a number into a value between 1 and 10, times a power of 10:</p>
+
+            <p>\[6500 = 6.5 \times 10^3\]</p>
+            <p>\[0.0042 = 4.2 \times 10^{-3}\]</p>
+
+            <p>Binary scientific notation works the same way, but with powers of 2. Any number can be written as a value between 1 and 2, times a power of 2:</p>
+
+            <p>\[6.5 = 1.625 \times 2^2\]</p>
+            <p>\[0.375 = 1.5 \times 2^{-2}\]</p>
+
+            <p>The key insight: if we always normalize so the leading digit is 1, we don't need to store it! In binary, there's only one non-zero digit (1), so every normalized number looks like \(1.\text{something} \times 2^p\). We can store just the "something" (the <em>fraction</em>) and the power \(p\).</p>
+
+            <h5>The Three Pieces</h5>
+
+            <p>This gives us three components to store:</p>
+
+            <ol>
+                <li><strong>Sign</strong>: Is the number positive or negative?</li>
+                <li><strong>Fraction</strong>: The bits after the implicit leading 1</li>
+                <li><strong>Exponent</strong>: The power of 2</li>
+            </ol>
+
+            <p>For a 32-bit float, these are packed as:</p>
+
+            <pre><code>[S][EEEEEEEE][FFFFFFFFFFFFFFFFFFFFFFF]
+ 1     8              23 bits
+ ↑     ↑               ↑
+sign exponent       fraction</code></pre>
+
+            <p><strong>The sign bit</strong> is simple: 0 for positive, 1 for negative.</p>
+
+            <p><strong>The fraction</strong> represents the digits after the binary point. Each bit position corresponds to a negative power of 2:</p>
+
+            <table>
+                <tr>
+                    <th>Bit position</th>
+                    <td>22</td>
+                    <td>21</td>
+                    <td>20</td>
+                    <td>19</td>
+                    <td>...</td>
+                    <td>0</td>
+                </tr>
+                <tr>
+                    <th>Value</th>
+                    <td>\(2^{-1}\)</td>
+                    <td>\(2^{-2}\)</td>
+                    <td>\(2^{-3}\)</td>
+                    <td>\(2^{-4}\)</td>
+                    <td>...</td>
+                    <td>\(2^{-23}\)</td>
+                </tr>
+                <tr>
+                    <th>Decimal</th>
+                    <td>0.5</td>
+                    <td>0.25</td>
+                    <td>0.125</td>
+                    <td>0.0625</td>
+                    <td>...</td>
+                    <td>~0.00000012</td>
+                </tr>
+            </table>
+
+            <p>For example, the fraction <code>101</code> (followed by 20 zeros) means \(2^{-1} + 2^{-3} = 0.5 + 0.125 = 0.625\). With the implicit leading 1, the full significand is \(1.625\).</p>
+
+            <p><strong>The exponent</strong> needs to represent both positive powers (for large numbers) and negative powers (for small numbers). Rather than using two's complement, IEEE 754 uses a <em>biased</em> representation: add 127 to the actual exponent before storing it. This converts the range \([-126, +127]\) into the unsigned range \([1, 254]\).<sup>7</sup></p>
+
+            <p class="footnote"><sup>7</sup> The values 0 and 255 are reserved for special cases: zero, subnormal numbers, infinity, and NaN.</p>
+
+            <p>Why bias instead of two's complement? Because it makes comparison easier. With biased exponents, larger stored values mean larger actual exponents—no sign bit to worry about.</p>
+
+            <h5>Putting It Together</h5>
+
+            <p>The formula to decode a 32-bit float:</p>
+
+            <p>\[\text{value} = (-1)^S \times (1 + F) \times 2^{E-127}\]</p>
+
+            <p>where \(S\) is the sign bit, \(F\) is the fraction interpreted as described above, and \(E\) is the stored (biased) exponent.</p>
+
+            <p>Let's encode \(6.5\):</p>
+
+            <ol>
+                <li>Convert to binary: \(6.5 = 110.1_2\)</li>
+                <li>Normalize: \(110.1_2 = 1.101_2 \times 2^2\)</li>
+                <li>Extract the pieces:
+                    <ul>
+                        <li>Sign = 0 (positive)</li>
+                        <li>Fraction = <code>10100000000000000000000</code> (the <code>.101</code> after the implicit 1)</li>
+                        <li>Exponent = \(2 + 127 = 129 = 10000001_2\)</li>
+                    </ul>
+                </li>
+            </ol>
+
+            <p>Result: <code>0|10000001|10100000000000000000000</code> = 0x40D00000</p>
+
+            <h5>Why This Layout Enables Fast Comparison</h5>
+
+            <p>Here's the clever part. The fields are arranged with the sign bit first, then the exponent, then the fraction. For positive floats, this means the bit pattern—interpreted as an unsigned integer—has the same ordering as the numeric value.</p>
+
+            <p><strong>Same exponent, increasing fraction:</strong></p>
+
+            <pre><code>Value   S  Exponent   Fraction                   Hex        Unsigned
+1.0     0  01111111   00000000000000000000000    0x3F800000  1065353216
+1.25    0  01111111   01000000000000000000000    0x3FA00000  1067450368
+1.5     0  01111111   10000000000000000000000    0x3FC00000  1069547520
+1.75    0  01111111   11000000000000000000000    0x3FE00000  1071644672</code></pre>
+
+            <p>All four have the same exponent. Larger fraction → larger numeric value → larger bit pattern. The ordering matches.</p>
+
+            <p><strong>Same fraction, increasing exponent:</strong></p>
+
+            <pre><code>Value   S  Exponent   Fraction                   Hex        Unsigned
+1.5     0  01111111   10000000000000000000000    0x3FC00000  1069547520
+3.0     0  10000000   10000000000000000000000    0x40400000  1078001664
+6.0     0  10000001   10000000000000000000000    0x40C00000  1086324736
+12.0    0  10000010   10000000000000000000000    0x41400000  1094713344</code></pre>
+
+            <p>Same fraction, increasing exponent. Each step doubles the value. The bit patterns increase in the same order as the numeric values.</p>
+
+            <p>Because the exponent comes before the fraction in the bit layout, a larger exponent always wins—exactly what we want. This was a deliberate design choice: positive floats can be compared using integer comparison hardware.<sup>8</sup></p>
+
+            <p class="footnote"><sup>8</sup> This clever design is attributed to William Kahan, the primary architect of IEEE 754.</p>
+
+            <h5>The Problem with Negative Floats</h5>
+
+            <p>For negative floats, the ordering breaks. IEEE 754 uses sign-magnitude representation: the sign bit is separate, and the remaining bits encode the magnitude the same way as for positives.</p>
+
+            <p><strong>Same exponent, increasing fraction (negative):</strong></p>
+
+            <pre><code>Value   S  Exponent   Fraction                   Hex        Unsigned
+-1.0    1  01111111   00000000000000000000000    0xBF800000  3212836864
+-1.25   1  01111111   01000000000000000000000    0xBFA00000  3214934016
+-1.5    1  01111111   10000000000000000000000    0xBFC00000  3217031168
+-1.75   1  01111111   11000000000000000000000    0xBFE00000  3219128320</code></pre>
+
+            <p>Numerically: \(-1.0 > -1.25 > -1.5 > -1.75\)</p>
+
+            <p>But the bit patterns: \(3212836864 < 3214934016 < 3217031168 < 3219128320\)</p>
+
+            <p>The ordering is <em>reversed</em>. When the fraction increases, the magnitude increases—but for negative numbers, larger magnitude means <em>smaller</em> value.</p>
+
+            <p><strong>Same fraction, increasing exponent (negative):</strong></p>
+
+            <pre><code>Value   S  Exponent   Fraction                   Hex        Unsigned
+-1.5    1  01111111   10000000000000000000000    0xBFC00000  3217031168
+-3.0    1  10000000   10000000000000000000000    0xC0400000  3225419776
+-6.0    1  10000001   10000000000000000000000    0xC0C00000  3233808384
+-12.0   1  10000010   10000000000000000000000    0xC1400000  3242196992</code></pre>
+
+            <p>Numerically: \(-1.5 > -3.0 > -6.0 > -12.0\)</p>
+
+            <p>Bit patterns: \(3217031168 < 3225419776 < 3233808384 < 3242196992\)</p>
+
+            <p>Same problem. The core issue: for negative floats, "larger bit pattern = larger magnitude = more negative = smaller number."</p>
+
+            <p>So here's what we need:</p>
+            <ol>
+                <li>All positive floats should sort higher than all negative floats</li>
+                <li>Among positive floats, bit-pattern order is already correct</li>
+                <li>Among negative floats, we need to <em>reverse</em> the bit-pattern order</li>
+            </ol>
+
+            <p>The solution: <strong>flip the sign bit for positive floats, flip ALL bits for negative floats</strong>. Flipping the sign bit on positives makes them sort after negatives (since 1 > 0). Flipping all bits for negatives reverses their order, which is exactly what we need since their magnitude ordering is backwards.</p>
+
+            <pre><code>__device__ __host__ unsigned int float_to_sortable(float f) {
+    unsigned int bits = __float_as_uint(f);
+    // If sign bit is set (negative), flip all bits
+    // If sign bit is clear (positive), flip only sign bit
+    unsigned int mask = (bits & 0x80000000u) ? 0xFFFFFFFFu : 0x80000000u;
+    return bits ^ mask;
+}
+
+__device__ __host__ float sortable_to_float(unsigned int bits) {
+    // Reverse the transformation
+    unsigned int mask = (bits & 0x80000000u) ? 0x80000000u : 0xFFFFFFFFu;
+    return __uint_as_float(bits ^ mask);
+}</code></pre>
+
+            <p>Let's trace through some values:</p>
+
+            <pre><code>Original float → Bits                                → Transformed
+         -3.0 → 1 10000000 10000000000000000000000 → 0 01111111 01111111111111111111111
+         -2.0 → 1 10000000 00000000000000000000000 → 0 01111111 11111111111111111111111
+         -1.0 → 1 01111111 00000000000000000000000 → 0 10000000 11111111111111111111111
+          0.0 → 0 00000000 00000000000000000000000 → 1 00000000 00000000000000000000000
+          1.0 → 0 01111111 00000000000000000000000 → 1 01111111 00000000000000000000000
+          2.0 → 0 10000000 00000000000000000000000 → 1 10000000 00000000000000000000000
+          3.0 → 0 10000000 10000000000000000000000 → 1 10000000 10000000000000000000000</code></pre>
+
+            <p>The transformed values are now in the correct order for unsigned comparison. Negative floats end up in the lower half (their sign bit became 0), positive floats in the upper half (their sign bit became 1), and within each group the ordering is correct.</p>
         </article>
     </div>
 
