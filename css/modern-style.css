@@ -386,6 +386,28 @@ code {
     color: var(--text-primary);
 }
 
+/* Override Prism.js defaults */
+pre[class*="language-"],
+code[class*="language-"] {
+    font-family: 'JetBrains Mono', monospace !important;
+    font-size: 0.8rem !important;
+    line-height: 1.6 !important;
+    background: var(--bg-code) !important;
+}
+
+pre[class*="language-"] {
+    background: var(--bg-code) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 6px !important;
+    padding: 1.5rem !important;
+    margin: 2rem 0 !important;
+}
+
+/* Ensure all Prism tokens have transparent background */
+.token {
+    background: transparent !important;
+}
+
 p code {
     background: var(--bg-code);
     padding: 0.15rem 0.4rem;
@@ -471,6 +493,70 @@ p code {
     padding: 0;
     font-size: inherit;
     color: inherit;
+}
+
+/* Sidenote Footnotes */
+.sidenote-layout {
+    max-width: 1000px;
+    margin: 0 auto;
+    padding: 0 2rem;
+}
+
+.sidenote-layout .article-header,
+.sidenote-layout article {
+    max-width: 620px;
+    margin: 0 auto;
+}
+
+.sidenote-layout article {
+    position: relative;
+}
+
+.footnote {
+    float: right;
+    clear: right;
+    width: 260px;
+    margin-right: -320px;
+    margin-top: 0.25rem;
+    margin-bottom: 1rem;
+    font-size: 0.78rem;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    position: relative;
+}
+
+.footnote sup {
+    font-weight: 600;
+    color: var(--accent);
+    margin-right: 0.25rem;
+}
+
+.footnote code {
+    font-size: inherit;
+    padding: 0.1rem 0.3rem;
+}
+
+/* For narrower screens, footnotes go inline */
+@media (max-width: 1050px) {
+    .sidenote-layout {
+        max-width: 720px;
+    }
+
+    .sidenote-layout .article-header,
+    .sidenote-layout article {
+        max-width: none;
+    }
+
+    .footnote {
+        float: none;
+        width: 100%;
+        margin-right: 0;
+        margin-left: 0;
+        padding: 1rem;
+        background: var(--bg-secondary);
+        border-left: 2px solid var(--accent-dim);
+        border-radius: 0 4px 4px 0;
+    }
 }
 
 /* Blockquotes */

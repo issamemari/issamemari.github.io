@@ -11,8 +11,12 @@
         href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Newsreader:ital,wght@0,400;0,500;0,600;1,400&display=swap"
         rel="stylesheet">
     <link rel="stylesheet" href="../css/modern-style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism.min.css">
     <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
     <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-c.min.js"></script>
 </head>
 
 <body>
@@ -29,7 +33,7 @@
         </div>
     </header>
 
-    <div class="container">
+    <div class="container sidenote-layout">
         <div class="article-header">
             <div class="article-meta">
                 <span class="tag">GPU</span>
@@ -46,7 +50,7 @@
             <h2>The Humbling</h2>
 
             <p>I started this project thinking I had a decent TopK implementation. I was combining ideas from <a
-                    href="https://arxiv.org/abs/2104.13519">Dr. TopK</a><sup>1</sup>
+                    href="https://arxiv.org/abs/2109.08219">Dr. TopK</a><sup>1</sup>
                 with a simple selection approach: loop <code>i = 0</code> to <code>K</code>, find the maximum in
                 <code>array[i:]</code>, swap it with <code>array[i]</code>. After some optimizations—parallel
                 reductions, warp-level operations, block-level coordination—I thought I had myself a pretty good kernel.
@@ -167,7 +171,7 @@ bucket 6: 66, 61</code></pre>
 
             <p>Here's a Python implementation that captures the recursive structure:</p>
 
-            <pre><code>def radix_select(array, k, digit_rank) -> list:
+            <pre><code class="language-python">def radix_select(array, k, digit_rank) -> list:
     if digit_rank < 0:
         return list(array)[:k]
 
@@ -205,7 +209,7 @@ bucket 6: 66, 61</code></pre>
 
             <p>Before we can implement this on a GPU, we need to address some impedance mismatches between the Python sketch and CUDA C.</p>
 
-            <h3>Dynamic Allocation is the Enemy</h3>
+            <h2>Dynamic Allocation is the Enemy</h2>
 
             <p>The Python implementation casually creates new lists for each bucket at each recursion level. This is
                 fine for a 20-line prototype, but on a GPU, dynamic memory allocation is expensive—and doing it from
@@ -242,7 +246,7 @@ Pass 3 - Scatter to output:
 
             <p class="footnote"><sup>4</sup> This is still a simplification. Real implementations use per-block histograms to reduce contention, then combine them. We'll get there.</p>
 
-            <h3>The Negative Number Problem</h3>
+            <h2>The Negative Number Problem</h2>
 
             <p>There's a more subtle issue lurking in our algorithm. Let's trace through radix select with some negative numbers:</p>
 
@@ -278,7 +282,7 @@ digit 5: 5</code></pre>
 
             <p>The problem is fundamental: our algorithm assumes that higher digits mean larger values. But -3 isn't larger than 2 just because 3 > 2. The sign completely changes the ordering.</p>
 
-            <h4>What We Need</h4>
+            <h3>What We Need</h3>
 
             <p>For radix select to work, we need a representation where the digit-by-digit comparison matches numeric ordering. Specifically:</p>
 
@@ -292,7 +296,7 @@ digit 5: 5</code></pre>
 
             <p>This is where we'll need to dive into how computers actually represent negative numbers—using a system called two's complement. The good news: there's a simple bit-manipulation trick that makes everything work. But first, let's understand the representation.</p>
 
-            <h4>A Primer on Two's Complement</h4>
+            <h3>A Primer on Two's Complement</h3>
 
             <p>Let's work with 8-bit integers first—the principles scale to 32 and 64 bits.</p>
 
@@ -341,7 +345,7 @@ Add 1:                    0b10000000 = 128 ✓</code></pre>
 
             <p class="footnote"><sup>6</sup> This is why two's complement won the representation wars. One's complement and sign-magnitude both require special handling for arithmetic operations.</p>
 
-            <h4>Why This Breaks Radix Select</h4>
+            <h3>Why This Breaks Radix Select</h3>
 
             <p>Back to our example, now with 8-bit two's complement:</p>
 
@@ -387,7 +391,7 @@ Actual signed values:       0   1  127  -128   -1</code></pre>
 
             <p>The positive numbers are fine—their relative order is preserved. But negatives come <em>after</em> all positives in bit-pattern order, and they're internally reversed: -1 (0xFF) appears larger than -128 (0x80).</p>
 
-            <h4>The Fix: Flip the Sign Bit</h4>
+            <h3>The Fix: Flip the Sign Bit</h3>
 
             <p>We need a transformation that makes bit-pattern ordering match numeric ordering. The solution is surprisingly simple: <strong>flip the most significant bit</strong>.</p>
 
@@ -415,7 +419,7 @@ Original:     -3   -1     2     4     5  ✓</code></pre>
 
             <p>For 32-bit integers:</p>
 
-            <pre><code>// Transform signed int to radix-sortable unsigned
+            <pre><code class="language-c">// Transform signed int to radix-sortable unsigned
 __device__ __host__ unsigned int to_sortable(int x) {
     return (unsigned int)x ^ 0x80000000u;  // flip MSB
 }
@@ -429,11 +433,11 @@ __device__ __host__ int from_sortable(unsigned int x) {
 
             <p>We apply <code>to_sortable()</code> before radix select, run the algorithm on unsigned values, then apply <code>from_sortable()</code> to the results. The transformation is its own inverse, so we use the same XOR operation both ways.</p>
 
-            <h4>What About Floating-Point Numbers?</h4>
+            <h3>What About Floating-Point Numbers?</h3>
 
             <p>The same principle applies to floats, but IEEE 754 floating-point representation requires a slightly different transformation. Before we get there, let's understand how floats work.</p>
 
-            <h5>The Problem</h5>
+            <h4>The Problem</h4>
 
             <p>Writing integers in binary is straightforward—two's complement handles both positive and negative values elegantly. Floating-point numbers are trickier. The core challenge is representing the decimal point. When designing a binary representation for floats, you need to balance several concerns:</p>
 
@@ -444,7 +448,7 @@ __device__ __host__ int from_sortable(unsigned int x) {
                 <li><strong>Uniqueness</strong>: Ideally, each number should have exactly one representation.</li>
             </ul>
 
-            <h5>Scientific Notation to the Rescue</h5>
+            <h4>Scientific Notation to the Rescue</h4>
 
             <p>The IEEE 754 designers used scientific notation. You're probably familiar with base-10 scientific notation, where you factor a number into a value between 1 and 10, times a power of 10:</p>
 
@@ -458,7 +462,7 @@ __device__ __host__ int from_sortable(unsigned int x) {
 
             <p>The key insight: if we always normalize so the leading digit is 1, we don't need to store it! In binary, there's only one non-zero digit (1), so every normalized number looks like \(1.\text{something} \times 2^p\). We can store just the "something" (the <em>fraction</em>) and the power \(p\).</p>
 
-            <h5>The Three Pieces</h5>
+            <h4>The Three Pieces</h4>
 
             <p>This gives us three components to store:</p>
 
@@ -517,7 +521,7 @@ sign exponent       fraction</code></pre>
 
             <p>Why bias instead of two's complement? Because it makes comparison easier. With biased exponents, larger stored values mean larger actual exponents—no sign bit to worry about.</p>
 
-            <h5>Putting It Together</h5>
+            <h4>Putting It Together</h4>
 
             <p>The formula to decode a 32-bit float:</p>
 
@@ -541,7 +545,7 @@ sign exponent       fraction</code></pre>
 
             <p>Result: <code>0|10000001|10100000000000000000000</code> = 0x40D00000</p>
 
-            <h5>Why This Layout Enables Fast Comparison</h5>
+            <h4>Why This Layout Enables Fast Comparison</h4>
 
             <p>Here's the clever part. The fields are arranged with the sign bit first, then the exponent, then the fraction. For positive floats, this means the bit pattern—interpreted as an unsigned integer—has the same ordering as the numeric value.</p>
 
@@ -569,7 +573,7 @@ sign exponent       fraction</code></pre>
 
             <p class="footnote"><sup>8</sup> This clever design is attributed to William Kahan, the primary architect of IEEE 754.</p>
 
-            <h5>The Problem with Negative Floats</h5>
+            <h4>The Problem with Negative Floats</h4>
 
             <p>For negative floats, the ordering breaks. IEEE 754 uses sign-magnitude representation: the sign bit is separate, and the remaining bits encode the magnitude the same way as for positives.</p>
 
@@ -610,7 +614,7 @@ sign exponent       fraction</code></pre>
 
             <p>The solution: <strong>flip the sign bit for positive floats, flip ALL bits for negative floats</strong>. Flipping the sign bit on positives makes them sort after negatives (since 1 > 0). Flipping all bits for negatives reverses their order, which is exactly what we need since their magnitude ordering is backwards.</p>
 
-            <pre><code>__device__ __host__ unsigned int float_to_sortable(float f) {
+            <pre><code class="language-c">__device__ __host__ unsigned int float_to_sortable(float f) {
     unsigned int bits = __float_as_uint(f);
     // If sign bit is set (negative), flip all bits
     // If sign bit is clear (positive), flip only sign bit
